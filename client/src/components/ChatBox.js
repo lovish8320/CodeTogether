@@ -1,29 +1,33 @@
 import React, { useEffect, useRef, useState } from "react";
-import { io } from "socket.io-client";
 
-const socket = io("http://localhost:5000"); // Adjust if needed
-
-function ChatBox({ roomId, username }) {
+function ChatBox({ roomId, username, socketRef }) {
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState([]);
   const chatEndRef = useRef(null);
 
   useEffect(() => {
+    if (!socketRef || !socketRef.current) return;
+    
+    const socket = socketRef.current;
+
     socket.emit("get-chat-history", roomId);
 
-    socket.on("chat-history", (messages) => {
+    const handleChatHistory = (messages) => {
       setChat(messages);
-    });
+    };
 
-    socket.on("chat-message", (data) => {
+    const handleChatMessage = (data) => {
       setChat((prev) => [...prev, data]);
-    });
+    };
+
+    socket.on("chat-history", handleChatHistory);
+    socket.on("chat-message", handleChatMessage);
 
     return () => {
-      socket.off("chat-history");
-      socket.off("chat-message");
+      socket.off("chat-history", handleChatHistory);
+      socket.off("chat-message", handleChatMessage);
     };
-  }, [roomId]);
+  }, [roomId, socketRef]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -31,9 +35,9 @@ function ChatBox({ roomId, username }) {
 
   const sendMessage = (e) => {
     e.preventDefault();
-    if (!message.trim()) return;
+    if (!message.trim() || !socketRef.current) return;
 
-    socket.emit("chat-message", {
+    socketRef.current.emit("chat-message", {
       roomId,
       username,
       message,
@@ -52,7 +56,7 @@ function ChatBox({ roomId, username }) {
       display: "flex",
       flexDirection: "column",
     }}>
-      <h5 style={{ marginBottom: "10px" }}>💬 Chat</h5>
+      <h5 style={{ marginBottom: "10px", fontSize: "14px", fontWeight: "bold" }}>💬 CHAT</h5>
 
       <div style={{
         flex: 1,
@@ -60,11 +64,13 @@ function ChatBox({ roomId, username }) {
         marginBottom: "10px",
         border: "1px solid #333",
         padding: "8px",
-        borderRadius: "5px"
+        borderRadius: "5px",
+        backgroundColor: "#0d0d0d",
+        fontSize: "13px"
       }}>
         {chat.map((msg, i) => (
           <div key={i} style={{ marginBottom: "6px" }}>
-            <strong>{msg.username}:</strong> {msg.message}
+            <strong style={{ color: "#58a6ff" }}>{msg.username}:</strong> {msg.message}
           </div>
         ))}
         <div ref={chatEndRef} />
@@ -79,19 +85,21 @@ function ChatBox({ roomId, username }) {
             flex: 1,
             padding: "8px",
             borderRadius: "4px",
-            border: "none",
+            border: "1px solid #444",
             backgroundColor: "#2e2e2e",
-            color: "#fff"
+            color: "#fff",
+            fontSize: "13px"
           }}
           placeholder="Type a message..."
         />
         <button type="submit" style={{
           padding: "8px 12px",
           borderRadius: "4px",
-          backgroundColor: "#007bff",
+          backgroundColor: "#2ea043",
           color: "#fff",
           border: "none",
-          cursor: "pointer"
+          cursor: "pointer",
+          fontSize: "13px"
         }}>
           Send
         </button>

@@ -1,151 +1,161 @@
-import React, { useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { initSocket } from "../Socket";
+import React, { useRef, useEffect } from "react";
+import MonacoEditor from "@monaco-editor/react";
 import { ACTIONS } from "../Actions";
-import toast from "react-hot-toast";
-import { MessageSquare } from "lucide-react";
 
-function Editor() {
-  const socketRef = useRef(null);
-  const codeRef = useRef("");
-  const location = useLocation();
-  const { roomId } = useParams();
-  const [code, setCode] = useState("");
-  const username = location.state?.username;
-  const [, setClients] = useState([]);
-  const navigate = useNavigate();
+const LANGUAGES = [
+  "javascript", "python", "cpp", "c", "java", "html", "css", "json", "plaintext"
+];
+
+function Editor({ socketRef, roomId, username, activeFile, onCodeChange, onLanguageChange }) {
+  const editorRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
+  const monacoRef = useRef(null);
+  const remoteCursorsRef = useRef({}); // { username: { position, decorationIds: [] } }
+
+  // Generate a consistent color for a username
+  const stringToColor = (str) => {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+    return '#' + '00000'.substring(0, 6 - c.length) + c;
+  };
 
   useEffect(() => {
-    const init = async () => {
-      try {
-        socketRef.current = await initSocket();
-        socketRef.current.emit(ACTIONS.JOIN, { roomId, username });
+    if (!socketRef.current) return;
 
-        socketRef.current.on("connect_error", handleError);
-        socketRef.current.on("connect_failed", handleError);
+    const handleCursorChange = ({ username: remoteUser, position, fileId }) => {
+      if (!activeFile || fileId !== activeFile.id || remoteUser === username) return;
+      if (!editorRef.current || !monacoRef.current) return;
 
-        function handleError(e) {
-          toast.error("Socket connection failed.");
-        }
-
-        socketRef.current.on(ACTIONS.JOINED, ({ clients, username: joinedUser, socketId }) => {
-          if (joinedUser !== username) {
-            toast.success(`${joinedUser} joined the room.`);
+      const color = stringToColor(remoteUser);
+      
+      // Inject CSS for this user if not already present
+      const styleId = `remote-cursor-style-${remoteUser}`;
+      if (!document.getElementById(styleId)) {
+        const style = document.createElement("style");
+        style.id = styleId;
+        style.innerHTML = `
+          .remote-cursor-${remoteUser} { border-left: 2px solid ${color}; position: relative; z-index: 10; }
+          .remote-cursor-${remoteUser}::after {
+            content: '${remoteUser}';
+            position: absolute;
+            top: -15px;
+            left: 0;
+            background-color: ${color};
+            color: white;
+            font-size: 10px;
+            padding: 2px 4px;
+            border-radius: 2px;
+            white-space: nowrap;
+            pointer-events: none;
+            z-index: 20;
           }
-
-          setClients(clients);
-
-          socketRef.current.emit(ACTIONS.SYNC_CODE, {
-            code: codeRef.current,
-            socketId,
-          });
-        });
-
-        socketRef.current.on(ACTIONS.DISCONNECTED, ({ socketId, username }) => {
-          toast(`${username} left the room.`);
-          setClients((prev) => prev.filter((client) => client.socketId !== socketId));
-        });
-
-        socketRef.current.on(ACTIONS.CODE_CHANGE, ({ code }) => {
-          setCode(code);
-          codeRef.current = code;
-        });
-      } catch (err) {
-        toast.error("Something went wrong.");
+        `;
+        document.head.appendChild(style);
       }
+
+      const prevDecorations = remoteCursorsRef.current[remoteUser]?.decorationIds || [];
+      const newDecorations = editorRef.current.deltaDecorations(prevDecorations, [
+        {
+          range: new monacoRef.current.Range(position.lineNumber, position.column, position.lineNumber, position.column),
+          options: {
+            className: `remote-cursor-${remoteUser}`,
+            hoverMessage: { value: remoteUser },
+          },
+        },
+      ]);
+
+      remoteCursorsRef.current[remoteUser] = { position, decorationIds: newDecorations };
     };
 
-    init();
+    socketRef.current.on(ACTIONS.CURSOR_CHANGE, handleCursorChange);
 
     return () => {
-      socketRef.current.disconnect();
-      socketRef.current.off(ACTIONS.JOINED);
-      socketRef.current.off(ACTIONS.DISCONNECTED);
+      socketRef.current.off(ACTIONS.CURSOR_CHANGE, handleCursorChange);
     };
-  }, [roomId, username]);
+  }, [socketRef, activeFile, username]);
 
-  const handleCodeChange = (e) => {
-    const value = e.target.value;
-    setCode(value);
-    codeRef.current = value;
+  // Handle editor mounting
+  const handleEditorDidMount = (editor, monaco) => {
+    editorRef.current = editor;
+    monacoRef.current = monaco;
 
-    socketRef.current.emit(ACTIONS.CODE_CHANGE, {
-      roomId,
-      code: value,
+    editor.onDidChangeCursorPosition((e) => {
+      if (socketRef.current && activeFile) {
+        socketRef.current.emit(ACTIONS.CURSOR_CHANGE, {
+          roomId,
+          username,
+          fileId: activeFile.id,
+          position: e.position,
+        });
+      }
     });
   };
 
-  const goToChat = () => {
-    navigate("/chat", { state: { roomId, username } });
+  // Handle local code changes
+  const handleEditorChange = (value) => {
+    if (activeFile) {
+      onCodeChange(activeFile.id, value);
+      if (socketRef.current) {
+        socketRef.current.emit(ACTIONS.CODE_CHANGE, {
+          roomId,
+          fileId: activeFile.id,
+          code: value,
+        });
+
+        // Typing indicator logic
+        socketRef.current.emit(ACTIONS.TYPING, { roomId, username });
+        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+        
+        typingTimeoutRef.current = setTimeout(() => {
+          socketRef.current.emit(ACTIONS.STOP_TYPING, { roomId, username });
+        }, 1000);
+      }
+    }
   };
 
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100vh",
-        width: "100%",
-        overflow: "hidden",
-        backgroundColor: "#121212",
-      }}
-    >
-      {/* Header */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: "12px 16px",
-          backgroundColor: "#1e1e1e",
-          borderBottom: "1px solid #333",
-          flexShrink: 0,
-          width: "100%",
-        }}
-      >
-        <span style={{ color: "#58a6ff", fontWeight: "bold", fontSize: "16px" }}>
-          Room ID: {roomId}
-        </span>
-        <button
-          onClick={goToChat}
-          style={{
-            backgroundColor: "#007bff",
-            color: "#fff",
-            border: "none",
-            borderRadius: "6px",
-            padding: "6px 12px",
-            display: "flex",
-            alignItems: "center",
-            gap: "6px",
-            cursor: "pointer",
-          }}
-        >
-          <MessageSquare size={18} />
-          Chat
-        </button>
+  if (!activeFile) {
+    return (
+      <div className="d-flex justify-content-center align-items-center h-100" style={{ backgroundColor: '#1e1e1e', color: '#888' }}>
+        <p>Select a file to start coding</p>
       </div>
+    );
+  }
 
-      {/* Code Editor */}
-      <textarea
-        value={code}
-        onChange={handleCodeChange}
-        placeholder="Write your code here..."
-        style={{
-          flex: 1,
-          width: "100%",
-          height: "100%",
-          backgroundColor: "#1e1e1e",
-          color: "#ffffff",
-          border: "none",
-          padding: "16px",
-          fontSize: "16px",
-          fontFamily: "monospace",
-          outline: "none",
-          resize: "none",
-          boxSizing: "border-box",
-          overflow: "auto",
-        }}
-      />
+  return (
+    <div style={{ height: "100%", width: "100%", display: "flex", flexDirection: "column" }}>
+      <div style={{ padding: "8px 16px", backgroundColor: "#1e1e1e", color: "#ccc", borderBottom: "1px solid #333", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span>{activeFile.name}</span>
+        <select 
+          value={activeFile.language} 
+          onChange={(e) => onLanguageChange(activeFile.id, e.target.value)}
+          className="form-select form-select-sm"
+          style={{ width: "auto", backgroundColor: "#333", color: "#fff", border: "1px solid #444" }}
+        >
+          {LANGUAGES.map(lang => (
+            <option key={lang} value={lang}>{lang}</option>
+          ))}
+        </select>
+      </div>
+      <div style={{ flex: 1 }}>
+        <MonacoEditor
+          height="100%"
+          language={activeFile.language}
+          theme="vs-dark"
+          value={activeFile.code}
+          onChange={handleEditorChange}
+          onMount={handleEditorDidMount}
+          options={{
+            minimap: { enabled: false },
+            fontSize: 14,
+            wordWrap: "on",
+            scrollBeyondLastLine: false,
+            automaticLayout: true,
+          }}
+        />
+      </div>
     </div>
   );
 }
